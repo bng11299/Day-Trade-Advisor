@@ -1,25 +1,22 @@
+import yfinance as yf
 import pandas_ta as ta
-from .base import Strategy
+from strategies.base import Strategy
 
 class MovingAverageStrategy(Strategy):
-    def __init__(self, short=20, long=50):
-        self.short = short
-        self.long = long
+    def analyze(self, ticker):
+        print(f"\n📊 Analyzing {ticker} with SMA Strategy...")
 
-    def name(self):
-        return f"SMA Crossover ({self.short}/{self.long})"
+        df = yf.download(ticker, period="6mo", auto_adjust=True, progress=False)
+        if df.empty: 
+            return
 
-    def analyze(self, df):
-        df.ta.sma(length=self.short, append=True)
-        df.ta.sma(length=self.long, append=True)
+        df.ta.sma(length=20, append=True)
+        df.ta.sma(length=50, append=True)
 
-        short_sma = df[f"SMA_{self.short}"].iloc[-1]
-        long_sma = df[f"SMA_{self.long}"].iloc[-1]
-        price = df["Close"].iloc[-1]
-
-        if short_sma > long_sma and price > short_sma:
-            return "BUY"
-        elif short_sma < long_sma and price < short_sma:
-            return "SELL"
+        if df['Close'].iloc[-1] > df['SMA_20'].iloc[-1] > df['SMA_50'].iloc[-1]:
+            print(f"✅ {ticker} is in an Uptrend")
+        elif df['Close'].iloc[-1] < df['SMA_20'].iloc[-1] < df['SMA_50'].iloc[-1]:
+            print(f"⚠️ {ticker} is in a Downtrend")
         else:
-            return "HOLD"
+            print(f"➖ {ticker} is moving Sideways")
+
