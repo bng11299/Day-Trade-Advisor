@@ -26,7 +26,7 @@ cd Day-Trade-Advisor
 
 python -m venv .venv
 .\.venv\Scripts\activate  # Windows
-# or
+#or
 source .venv/bin/activate  # macOS/Linux
 
 
