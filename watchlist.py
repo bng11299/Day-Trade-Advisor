@@ -1,26 +1,34 @@
 import json
 import os
 
-WATCHLIST_FILE = "watchlist.json"
+WATCHLIST_FILE = os.path.join(os.path.dirname(__file__), "watchlist.json")
 
-def load_watchlist():
+
+def load() -> list[str]:
     if not os.path.exists(WATCHLIST_FILE):
         return []
-    with open(WATCHLIST_FILE, "r") as f:
+    with open(WATCHLIST_FILE) as f:
         return json.load(f)
 
-def save_watchlist(stocks):
+
+def save(symbols: list[str]):
     with open(WATCHLIST_FILE, "w") as f:
-        json.dump(stocks, f, indent=2)
+        json.dump(symbols, f, indent=2)
 
-def add_stock(symbol):
-    stocks = load_watchlist()
-    if symbol not in stocks:
-        stocks.append(symbol)
-        save_watchlist(stocks)
 
-def remove_stock(symbol):
-    stocks = load_watchlist()
-    if symbol in stocks:
-        stocks.remove(symbol)
-        save_watchlist(stocks)
+def add(symbol: str) -> bool:
+    symbols = load()
+    if symbol in symbols:
+        return False
+    symbols.append(symbol)
+    save(symbols)
+    return True
+
+
+def remove(symbol: str) -> bool:
+    symbols = load()
+    if symbol not in symbols:
+        return False
+    symbols.remove(symbol)
+    save(symbols)
+    return True
