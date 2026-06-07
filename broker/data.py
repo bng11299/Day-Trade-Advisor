@@ -101,10 +101,9 @@ class LiveBarStream:
     def add_symbol(self, symbol: str):
         if symbol not in self._buffers:
             self._buffers[symbol] = deque(maxlen=self.buffer)
-            if self._stream:
-                asyncio.run_coroutine_threadsafe(
-                    self._stream.subscribe_bars(self._on_bar, symbol),
-                    self._loop,
+            if self._stream and self._loop:
+                self._loop.call_soon_threadsafe(
+                    self._stream.subscribe_bars, self._on_bar, symbol
                 )
 
     def remove_symbol(self, symbol: str):
@@ -141,7 +140,7 @@ class LiveBarStream:
         symbols = list(self._buffers.keys())
         if symbols:
             self._stream.subscribe_bars(self._on_bar, *symbols)
-        self._loop.run_until_complete(self._stream._run())
+        self._loop.run_until_complete(self._stream.run())
 
     def start(self):
         """Start streaming in a background thread (non-blocking)."""
