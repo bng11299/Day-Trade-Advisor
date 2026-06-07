@@ -34,12 +34,14 @@ class RiskManager:
         atr_period: int = 14,
         atr_stop_multiplier: float = 1.5,
         reward_ratio: float = 2.0,
+        min_atr: float = 0.50,    # skip low-volatility symbols where signals are noise
     ):
         self.account_value = account_value
         self.risk_pct = risk_pct
         self.atr_period = atr_period
         self.atr_stop_multiplier = atr_stop_multiplier
         self.reward_ratio = reward_ratio
+        self.min_atr = min_atr
 
     def _atr(self, df: pd.DataFrame) -> float:
         high = df["High"]
@@ -55,6 +57,9 @@ class RiskManager:
             return None
 
         atr = self._atr(df)
+        if atr < self.min_atr:
+            return None  # symbol too quiet — signals are noise
+
         entry = float(df["Close"].iloc[-1])
         stop_distance = atr * self.atr_stop_multiplier
 

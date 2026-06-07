@@ -28,24 +28,64 @@ from engine.risk import RiskManager
 from strategies.base import Direction
 
 
-def run_backtest(symbol: str, df: pd.DataFrame, account: float, lookback: int = 60) -> list[dict]:
+EOD_CLOSE_HOUR = 20   # 3:45pm ET = 20:45 UTC; halt new entries after 20:00 UTC
+EOD_CLOSE_MINUTE = 0
+DAILY_LOSS_LIMIT_PCT = 0.02  # halt trading for the day if down >2% of account
+
+
+def _close_trade(open_trade: dict, exit_price: float, ts, result: str, account: float) -> tuple[dict, float]:
+    pnl = (exit_price - open_trade["entry"]) * open_trade["shares"]
+    if open_trade["direction"] == Direction.SELL:
+        pnl = -pnl
+    account += pnl
+    open_trade.update(exit_price=exit_price, exit_time=ts,
+                      pnl=round(pnl, 2), result=result,
+                      account_after=round(account, 2))
+    return open_trade, account
+
+
+def run_backtest(
+    symbol: str,
+    df: pd.DataFrame,
+    account: float,
+    lookback: int = 60,
+    long_only: bool = False,
+) -> list[dict]:
     """
     Walk forward through the intraday bars.
     At each bar, feed the last `lookback` bars into the aggregator.
+    Applies: EOD close, daily loss halt, min-ATR filter, confidence threshold.
     """
-    aggregator = SignalAggregator()
+    aggregator = SignalAggregator(long_only=long_only)
     risk_mgr = RiskManager(account_value=account)
 
     trades = []
     open_trade = None
+    day_start_account = account
+    current_day = None
+    day_halted = False
 
     for i in range(lookback, len(df)):
         window = df.iloc[i - lookback : i].copy()
         current_bar = df.iloc[i]
         current_price = float(current_bar["Close"])
         ts = df.index[i]
+        bar_date = ts.date()
 
-        # Check open trade stop/target
+        # Reset daily tracking at start of new day
+        if bar_date != current_day:
+            current_day = bar_date
+            day_start_account = account
+            day_halted = False
+
+        # EOD force-close: exit any open position before market close
+        eod = ts.hour > EOD_CLOSE_HOUR or (ts.hour == EOD_CLOSE_HOUR and ts.minute >= EOD_CLOSE_MINUTE)
+        if open_trade is not None and eod:
+            trade, account = _close_trade(open_trade, current_price, ts, "EOD", account)
+            trades.append(trade)
+            open_trade = None
+
+        # Check stop/target on open trade
         if open_trade is not None:
             direction = open_trade["direction"]
             if direction == Direction.BUY:
@@ -56,19 +96,22 @@ def run_backtest(symbol: str, df: pd.DataFrame, account: float, lookback: int = 
                 hit_sl = current_price >= open_trade["stop_loss"]
 
             if hit_tp or hit_sl:
+                result = "TP" if hit_tp else "SL"
                 exit_price = open_trade["take_profit"] if hit_tp else open_trade["stop_loss"]
-                pnl = (exit_price - open_trade["entry"]) * open_trade["shares"]
-                if direction == Direction.SELL:
-                    pnl = -pnl
-                account += pnl
-                open_trade["exit_price"] = exit_price
-                open_trade["exit_time"] = ts
-                open_trade["pnl"] = round(pnl, 2)
-                open_trade["result"] = "TP" if hit_tp else "SL"
-                open_trade["account_after"] = round(account, 2)
-                trades.append(open_trade)
+                trade, account = _close_trade(open_trade, exit_price, ts, result, account)
+                trades.append(trade)
                 open_trade = None
+
+                # Check if daily loss limit hit after closing
+                daily_loss_pct = (account - day_start_account) / day_start_account
+                if daily_loss_pct < -DAILY_LOSS_LIMIT_PCT:
+                    day_halted = True
+
             continue  # only one position at a time
+
+        # Skip new entries if halted or past EOD entry cutoff
+        if day_halted or eod:
+            continue
 
         agg = aggregator.analyze(window)
         if agg.direction == Direction.HOLD:
@@ -77,7 +120,7 @@ def run_backtest(symbol: str, df: pd.DataFrame, account: float, lookback: int = 
         risk_mgr.account_value = account
         params = risk_mgr.calculate(symbol, window, agg.direction)
         if params is None:
-            continue
+            continue  # also covers min-ATR filter
 
         open_trade = {
             "symbol": symbol,
@@ -95,19 +138,11 @@ def run_backtest(symbol: str, df: pd.DataFrame, account: float, lookback: int = 
             "account_after": None,
         }
 
-    # Close any open trade at last bar
+    # Close any remaining open trade at last bar
     if open_trade is not None:
-        exit_price = float(df["Close"].iloc[-1])
-        pnl = (exit_price - open_trade["entry"]) * open_trade["shares"]
-        if open_trade["direction"] == Direction.SELL:
-            pnl = -pnl
-        account += pnl
-        open_trade["exit_price"] = exit_price
-        open_trade["exit_time"] = df.index[-1]
-        open_trade["pnl"] = round(pnl, 2)
-        open_trade["result"] = "EOD"
-        open_trade["account_after"] = round(account, 2)
-        trades.append(open_trade)
+        trade, account = _close_trade(open_trade, float(df["Close"].iloc[-1]),
+                                      df.index[-1], "EOD", account)
+        trades.append(trade)
 
     return trades
 
@@ -183,6 +218,11 @@ def main():
         choices=["1m", "5m", "15m", "1h"],
         help="Bar interval (default: 5m)",
     )
+    parser.add_argument(
+        "--long-only",
+        action="store_true",
+        help="Only take BUY signals — recommended for bull-trend markets",
+    )
     args = parser.parse_args()
 
     api_key = os.environ.get("ALPACA_API_KEY")
@@ -208,7 +248,7 @@ def main():
             print(f"  No data for {symbol}, skipping.")
             continue
         print(f"  {len(df)} bars loaded.")
-        trades = run_backtest(symbol, df, account)
+        trades = run_backtest(symbol, df, account, long_only=args.long_only)
         all_trades.extend(trades)
         print(f"  {len(trades)} trades generated.")
 

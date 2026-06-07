@@ -34,9 +34,10 @@ class SignalAggregator:
         "VWAP": 0.35,
         "EMA": 0.25,
     }
-    CONFIDENCE_THRESHOLD = 0.55
+    CONFIDENCE_THRESHOLD = 0.65  # raised from 0.55 — filters low-conviction noise
 
-    def __init__(self):
+    def __init__(self, long_only: bool = False):
+        self.long_only = long_only  # suppress SELL signals in bull-trend markets
         self.orb = ORBStrategy()
         self.vwap = VWAPStrategy()
         self.ema = EMACrossoverStrategy()
@@ -72,16 +73,22 @@ class SignalAggregator:
 
         agg = AggregatedSignal(direction=direction, confidence=round(confidence, 3), components=signals)
 
-        # RSI veto: block BUY if overbought, block SELL if oversold
-        if direction == Direction.BUY and rsi_signal.direction == Direction.SELL:
+        # long_only mode: suppress all SELL signals
+        if self.long_only and direction == Direction.SELL:
             agg.vetoed = True
-            agg.veto_reason = rsi_signal.reason
+            agg.veto_reason = "long_only mode"
             agg.direction = Direction.HOLD
 
-        elif direction == Direction.SELL and rsi_signal.direction == Direction.BUY:
-            agg.vetoed = True
-            agg.veto_reason = rsi_signal.reason
-            agg.direction = Direction.HOLD
+        # RSI veto: block BUY if overbought, block SELL if oversold
+        if not agg.vetoed:
+            if direction == Direction.BUY and rsi_signal.direction == Direction.SELL:
+                agg.vetoed = True
+                agg.veto_reason = rsi_signal.reason
+                agg.direction = Direction.HOLD
+            elif direction == Direction.SELL and rsi_signal.direction == Direction.BUY:
+                agg.vetoed = True
+                agg.veto_reason = rsi_signal.reason
+                agg.direction = Direction.HOLD
 
         # Below threshold → hold
         if not agg.vetoed and agg.confidence < self.CONFIDENCE_THRESHOLD:

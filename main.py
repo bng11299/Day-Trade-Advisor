@@ -20,6 +20,8 @@ Commands (typed while running):
 import os
 import sys
 import threading
+import time
+from datetime import datetime, timezone
 
 import watchlist
 from engine.aggregator import SignalAggregator
@@ -27,6 +29,52 @@ from engine.risk import RiskManager
 from broker.alpaca import AlpacaBroker
 from broker.data import LiveBarStream
 from strategies.base import Direction
+
+EOD_CLOSE_UTC_HOUR = 20   # 3:45pm ET = 20:45 UTC
+EOD_CLOSE_UTC_MINUTE = 45
+DAILY_LOSS_LIMIT_PCT = 0.02
+
+
+def eod_monitor(broker: AlpacaBroker, stop_event: threading.Event, start_equity: float):
+    """Background thread: force-closes all positions at EOD and enforces daily loss limit."""
+    halted = False
+    last_halt_date = None
+
+    while not stop_event.is_set():
+        now = datetime.now(timezone.utc)
+        today = now.date()
+
+        # Reset halt each new trading day
+        if last_halt_date != today:
+            halted = False
+
+        if not halted:
+            # Daily loss limit check
+            try:
+                acct = broker.get_account()
+                daily_loss = (acct["equity"] - start_equity) / start_equity
+                if daily_loss < -DAILY_LOSS_LIMIT_PCT:
+                    print(f"\n[risk] Daily loss limit hit ({daily_loss:.1%}). Closing all positions.")
+                    broker.close_all_positions()
+                    halted = True
+                    last_halt_date = today
+            except Exception:
+                pass
+
+        # EOD force-close
+        past_eod = now.hour > EOD_CLOSE_UTC_HOUR or (
+            now.hour == EOD_CLOSE_UTC_HOUR and now.minute >= EOD_CLOSE_UTC_MINUTE
+        )
+        if past_eod:
+            try:
+                positions = broker.get_positions()
+                if positions:
+                    print(f"\n[EOD] Market close — closing {len(positions)} position(s).")
+                    broker.close_all_positions()
+            except Exception:
+                pass
+
+        time.sleep(30)
 
 
 def make_on_bar(broker: AlpacaBroker, aggregator: SignalAggregator, risk_mgr: RiskManager):
@@ -116,7 +164,7 @@ def main():
         sys.exit(1)
 
     broker = AlpacaBroker(api_key=api_key, secret_key=secret_key, paper=True)
-    aggregator = SignalAggregator()
+    aggregator = SignalAggregator(long_only=True)  # matches backtest config
     acct = broker.get_account()
     risk_mgr = RiskManager(account_value=acct["equity"])
 
@@ -124,11 +172,8 @@ def main():
 
     # Pre-load watchlist into stream
     symbols = watchlist.load()
-    if symbols:
-        stream.subscribe(symbols, make_on_bar(broker, aggregator, risk_mgr))
-    else:
-        # Still wire the callback so add_symbol works later
-        stream.subscribe([], make_on_bar(broker, aggregator, risk_mgr))
+    callback = make_on_bar(broker, aggregator, risk_mgr)
+    stream.subscribe(symbols, callback)
 
     print(f"Day Trade Bot started (paper trading, real-time stream)")
     print(f"Account equity: ${acct['equity']:.2f}")
@@ -139,6 +184,10 @@ def main():
     stream.start()
 
     stop_event = threading.Event()
+    threading.Thread(
+        target=eod_monitor, args=(broker, stop_event, acct["equity"]), daemon=True
+    ).start()
+
     input_loop(broker, stream, stop_event)
 
     print("Bot stopped.")
