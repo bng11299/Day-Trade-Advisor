@@ -141,7 +141,7 @@ class LiveBarStream:
         symbols = list(self._buffers.keys())
         if symbols:
             self._stream.subscribe_bars(self._on_bar, *symbols)
-        self._loop.run_until_complete(self._stream._run())
+        self._loop.run_until_complete(self._stream.run())
 
     def start(self):
         """Start streaming in a background thread (non-blocking)."""
