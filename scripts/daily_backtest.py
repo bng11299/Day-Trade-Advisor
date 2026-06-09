@@ -1,18 +1,16 @@
 """
-Daily backtest script — runs automatically after market close each day.
+Live shadow runner — runs during market hours alongside the live bot.
 
-Tracks a 30-day paper-trading period:
-  - Day 1: establishes the baseline
-  - Each subsequent day: appends one more day of results
-  - Day 30: prints a full 30-day performance report and marks the period complete
+For each bar received from the Alpaca stream, it runs the full strategy stack
+and logs what it WOULD do. At market close it pulls actual paper trades from
+Alpaca and compares signal vs execution, exposing slippage, missed fills, or
+strategy drift. Results are saved per-day and rolled into a 30-day summary.
 
-State is persisted in scripts/state.json so the script picks up where it left off
-if the machine was off or the script missed a run.
+Triggered at 9:30am ET by Task Scheduler (see scripts/schedule.ps1).
+Runs until market close (~4pm ET), then saves the day's report and exits.
 
-Run manually:
+Run manually (will wait for market hours if run early):
     python scripts/daily_backtest.py
-
-Scheduled automatically via scripts/schedule.ps1 (runs at 5:00pm ET on weekdays).
 """
 
 import json
@@ -20,28 +18,42 @@ import os
 import sys
 import csv
 import math
+import time
+import threading
+from collections import deque
 from datetime import datetime, timedelta, date, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
-# ── resolve project root regardless of where script is called from ────────────
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from backtest.runner import run_backtest, summarize, save_trades
-from broker.data import fetch_bars
+from alpaca.data.live import StockDataStream
+from alpaca.data.enums import DataFeed
+from alpaca.trading.client import TradingClient
+from engine.aggregator import SignalAggregator
+from engine.risk import RiskManager
+from backtest.runner import summarize
 from strategies.base import Direction
+import pandas as pd
 
 # ── configuration ─────────────────────────────────────────────────────────────
-SYMBOLS       = ["NVDA", "TSLA"]          # symbols to track
-INTERVAL      = "5m"                      # bar resolution
-ACCOUNT       = 100_000.0                 # match Alpaca paper account
-LONG_ONLY     = True                      # match live bot config
-PERIOD_DAYS   = 30                        # total tracking period
+SYMBOLS     = ["NVDA", "TSLA"]
+ACCOUNT     = 100_000.0
+LONG_ONLY   = True
+PERIOD_DAYS = 30
+BAR_BUFFER  = 120   # rolling bars kept per symbol for strategy lookback
 
-STATE_FILE    = ROOT / "scripts" / "state.json"
-RESULTS_DIR   = ROOT / "backtest" / "daily"
-SUMMARY_FILE  = ROOT / "backtest" / "30day_summary.csv"
+ET = ZoneInfo("America/New_York")
+MARKET_OPEN  = (9, 30)   # ET hour, minute
+MARKET_CLOSE = (16, 0)
 
+STATE_FILE   = ROOT / "scripts" / "state.json"
+RESULTS_DIR  = ROOT / "backtest" / "daily"
+SUMMARY_FILE = ROOT / "backtest" / "30day_summary.csv"
+
+
+# ── state helpers ─────────────────────────────────────────────────────────────
 
 def load_state() -> dict:
     if STATE_FILE.exists():
@@ -56,147 +68,255 @@ def save_state(state: dict):
         json.dump(state, f, indent=2)
 
 
-def is_weekday(d: date) -> bool:
-    return d.weekday() < 5  # Mon–Fri
+def today_et() -> date:
+    return datetime.now(ET).date()
 
 
-def last_trading_day() -> date:
-    """Most recent weekday on or before today."""
-    d = date.today()
-    while not is_weekday(d):
-        d -= timedelta(days=1)
-    return d
+def now_et() -> datetime:
+    return datetime.now(ET)
 
 
-def fetch_day(symbol: str, target_date: date, api_key: str, secret_key: str):
-    """Fetch one day of intraday bars for a symbol."""
-    start = target_date.strftime("%Y-%m-%d")
-    end   = (target_date + timedelta(days=1)).strftime("%Y-%m-%d")
-    return fetch_bars(symbol, start, end, interval=INTERVAL,
-                      api_key=api_key, secret_key=secret_key)
+def is_market_open() -> bool:
+    now = now_et()
+    if now.weekday() >= 5:
+        return False
+    after_open  = (now.hour, now.minute) >= MARKET_OPEN
+    before_close = (now.hour, now.minute) < MARKET_CLOSE
+    return after_open and before_close
 
 
-def run_day(target_date: date, api_key: str, secret_key: str) -> tuple[list[dict], dict]:
-    """Run backtest for a single trading day across all symbols. Returns trades + summary."""
-    all_trades = []
-    account = ACCOUNT
-
-    for symbol in SYMBOLS:
-        print(f"  Fetching {symbol} for {target_date} ...")
-        try:
-            df = fetch_day(symbol, target_date, api_key, secret_key)
-        except Exception as e:
-            print(f"    Error: {e}")
+def wait_for_market_open():
+    """Block until market opens. Prints a countdown."""
+    while not is_market_open():
+        now = now_et()
+        if now.weekday() >= 5:
+            print(f"  Weekend — market opens Monday. Checking again in 1 hour.")
+            time.sleep(3600)
             continue
+        open_today = now.replace(hour=MARKET_OPEN[0], minute=MARKET_OPEN[1], second=0)
+        if now < open_today:
+            wait_sec = int((open_today - now).total_seconds())
+            print(f"  Market opens at 9:30am ET. Waiting {wait_sec // 60}m {wait_sec % 60}s ...")
+            time.sleep(min(wait_sec, 60))
+        else:
+            # Past close for today
+            print("  Market is closed for today. Exiting.")
+            sys.exit(0)
 
-        if df.empty or len(df) < 30:
-            print(f"    {symbol}: no data (market closed or holiday).")
+
+# ── shadow signal logger ──────────────────────────────────────────────────────
+
+class ShadowRunner:
+    """
+    Subscribes to the same Alpaca bar stream as the live bot.
+    On every bar: runs the strategy, logs the signal and what trade it would place.
+    Does NOT submit orders — observation only.
+    """
+
+    def __init__(self, api_key: str, secret_key: str):
+        self.api_key    = api_key
+        self.secret_key = secret_key
+        self.aggregator = SignalAggregator(long_only=LONG_ONLY)
+        self.risk_mgr   = RiskManager(account_value=ACCOUNT)
+        self.buffers: dict[str, deque] = {s: deque(maxlen=BAR_BUFFER) for s in SYMBOLS}
+        self.signal_log: list[dict] = []
+        self._stream: StockDataStream | None = None
+        self._thread: threading.Thread | None = None
+        self._loop = None
+
+    async def _on_bar(self, bar):
+        sym = bar.symbol
+        if sym not in self.buffers:
+            return
+
+        row = {
+            "Open":   bar.open,
+            "High":   bar.high,
+            "Low":    bar.low,
+            "Close":  bar.close,
+            "Volume": bar.volume,
+        }
+        self.buffers[sym].append((bar.timestamp, row))
+
+        if len(self.buffers[sym]) < 30:
+            return  # need enough history for strategies
+
+        df = pd.DataFrame(
+            [r for _, r in self.buffers[sym]],
+            index=pd.DatetimeIndex([t for t, _ in self.buffers[sym]]),
+        )
+
+        agg = self.aggregator.analyze(df)
+        params = None
+        if agg.direction != Direction.HOLD:
+            self.risk_mgr.account_value = ACCOUNT
+            params = self.risk_mgr.calculate(sym, df, agg.direction)
+
+        entry = {
+            "time":       bar.timestamp.isoformat(),
+            "symbol":     sym,
+            "close":      bar.close,
+            "signal":     agg.direction.value,
+            "confidence": agg.confidence,
+            "reason":     str(agg),
+            "would_entry":     params.entry      if params else None,
+            "would_stop":      params.stop_loss  if params else None,
+            "would_target":    params.take_profit if params else None,
+            "would_shares":    params.shares     if params else None,
+            "would_risk":      params.risk_amount if params else None,
+        }
+        self.signal_log.append(entry)
+
+        tag = f"[{agg.direction.value}]" if agg.direction != Direction.HOLD else "[----]"
+        print(f"  {bar.timestamp.astimezone(ET).strftime('%H:%M')} {sym} {tag} conf={agg.confidence:.2f}  close={bar.close:.2f}", flush=True)
+
+    def _run(self):
+        import asyncio
+        self._loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self._loop)
+        self._stream = StockDataStream(self.api_key, self.secret_key, feed=DataFeed.IEX)
+        self._stream.subscribe_bars(self._on_bar, *SYMBOLS)
+        self._loop.run_until_complete(self._stream.run())
+
+    def start(self):
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+        print(f"  Shadow stream started. Watching: {SYMBOLS}")
+
+    def stop(self):
+        if self._stream and self._loop:
+            self._loop.call_soon_threadsafe(
+                lambda: self._loop.create_task(self._stream.stop_ws())
+            )
+
+
+# ── alpaca trade fetcher ──────────────────────────────────────────────────────
+
+def fetch_actual_trades(api_key: str, secret_key: str, target_date: date) -> list[dict]:
+    """Pull completed paper orders from Alpaca for the given date."""
+    client = TradingClient(api_key, secret_key, paper=True)
+    try:
+        orders = client.get_orders()
+    except Exception as e:
+        print(f"  Could not fetch orders: {e}")
+        return []
+
+    trades = []
+    for o in orders:
+        if not o.filled_at:
             continue
+        filled_date = o.filled_at.astimezone(ET).date()
+        if filled_date != target_date:
+            continue
+        trades.append({
+            "time":      o.filled_at.isoformat(),
+            "symbol":    o.symbol,
+            "side":      o.side.value,
+            "qty":       float(o.qty),
+            "fill_price": float(o.filled_avg_price) if o.filled_avg_price else None,
+            "status":    o.status.value,
+        })
+    return trades
 
-        print(f"    {len(df)} bars loaded.")
-        trades = run_backtest(symbol, df, account, long_only=LONG_ONLY)
-        all_trades.extend(trades)
-        if trades:
-            account = trades[-1]["account_after"]
-        print(f"    {len(trades)} trades → account ${account:,.2f}")
 
-    summary = summarize(all_trades, ACCOUNT)
-    return all_trades, summary
+# ── comparison report ─────────────────────────────────────────────────────────
+
+def compare_and_report(signal_log: list[dict], actual_trades: list[dict],
+                       day_num: int, target_date: date) -> dict:
+    """
+    Compare what the shadow strategy signalled vs what the live bot actually traded.
+    Returns a summary dict for the 30-day roll-up.
+    """
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Save signal log
+    sig_file = RESULTS_DIR / f"day{day_num:02d}_{target_date}_signals.csv"
+    if signal_log:
+        with open(sig_file, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=signal_log[0].keys())
+            writer.writeheader()
+            writer.writerows(signal_log)
+
+    # Save actual trades
+    act_file = RESULTS_DIR / f"day{day_num:02d}_{target_date}_actual.csv"
+    if actual_trades:
+        with open(act_file, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=actual_trades[0].keys())
+            writer.writeheader()
+            writer.writerows(actual_trades)
+
+    # Count shadow signals that called a trade
+    shadow_buys  = sum(1 for s in signal_log if s["signal"] == "BUY"  and s["would_entry"])
+    shadow_sells = sum(1 for s in signal_log if s["signal"] == "SELL" and s["would_entry"])
+    actual_buys  = sum(1 for t in actual_trades if t["side"] == "buy")
+    actual_sells = sum(1 for t in actual_trades if t["side"] == "sell")
+
+    alignment = "N/A"
+    if shadow_buys + shadow_sells > 0:
+        matched = min(shadow_buys, actual_buys) + min(shadow_sells, actual_sells)
+        total   = max(shadow_buys + shadow_sells, actual_buys + actual_sells)
+        alignment = f"{matched / total:.0%}" if total else "N/A"
+
+    print(f"\n  {'─'*45}")
+    print(f"  Day {day_num} wrap-up  |  {target_date.strftime('%A %b %d')}")
+    print(f"  {'─'*45}")
+    print(f"  Shadow signals  — BUY: {shadow_buys}  SELL: {shadow_sells}")
+    print(f"  Live bot trades — BUY: {actual_buys}  SELL: {actual_sells}")
+    print(f"  Signal alignment: {alignment}")
+    print(f"  Signal log  → {sig_file.name}")
+    print(f"  Actual trades → {act_file.name}")
+
+    return {
+        "day":           day_num,
+        "date":          target_date.isoformat(),
+        "shadow_signals": shadow_buys + shadow_sells,
+        "actual_trades":  actual_buys + actual_sells,
+        "alignment":      alignment,
+        "total_bars":     len(signal_log),
+    }
 
 
-def append_to_summary(day_num: int, target_date: date, summary: dict, num_trades: int):
-    """Append one row to the running 30-day CSV summary."""
+# ── 30-day summary ────────────────────────────────────────────────────────────
+
+def append_to_summary(row: dict):
     SUMMARY_FILE.parent.mkdir(parents=True, exist_ok=True)
     write_header = not SUMMARY_FILE.exists()
-
     with open(SUMMARY_FILE, "a", newline="") as f:
-        writer = csv.writer(f)
+        writer = csv.DictWriter(f, fieldnames=row.keys())
         if write_header:
-            writer.writerow([
-                "day", "date", "trades", "wins", "losses", "win_rate",
-                "daily_pnl", "daily_return_pct", "avg_win", "avg_loss",
-                "max_drawdown_pct", "sharpe"
-            ])
-        writer.writerow([
-            day_num,
-            target_date.isoformat(),
-            summary.get("trades", 0),
-            summary.get("wins", 0),
-            summary.get("losses", 0),
-            summary.get("win_rate", 0),
-            summary.get("total_pnl", 0),
-            summary.get("total_return_pct", 0),
-            summary.get("avg_win", 0),
-            summary.get("avg_loss", 0),
-            summary.get("max_drawdown_pct", 0),
-            summary.get("sharpe", 0),
-        ])
+            writer.writeheader()
+        writer.writerow(row)
 
 
 def print_30day_report():
-    """Read the 30-day summary CSV and print a final report."""
     if not SUMMARY_FILE.exists():
-        print("No summary data found.")
+        print("No summary data yet.")
         return
 
-    rows = []
     with open(SUMMARY_FILE) as f:
-        reader = csv.DictReader(f)
-        rows = list(reader)
+        rows = list(csv.DictReader(f))
 
     if not rows:
         return
 
-    total_trades = sum(int(r["trades"]) for r in rows)
-    total_wins   = sum(int(r["wins"]) for r in rows)
-    total_pnl    = sum(float(r["daily_pnl"]) for r in rows)
-    trading_days = sum(1 for r in rows if int(r["trades"]) > 0)
-    win_rate     = total_wins / total_trades if total_trades else 0
-
-    daily_pnls = [float(r["daily_pnl"]) for r in rows]
-    equity = ACCOUNT
-    peak = equity
-    max_dd = 0.0
-    for pnl in daily_pnls:
-        equity += pnl
-        peak = max(peak, equity)
-        dd = (peak - equity) / peak
-        max_dd = max(max_dd, dd)
-
-    if len(daily_pnls) > 1:
-        mean = sum(daily_pnls) / len(daily_pnls)
-        var  = sum((p - mean) ** 2 for p in daily_pnls) / (len(daily_pnls) - 1)
-        std  = math.sqrt(var) if var > 0 else 1e-9
-        sharpe = (mean / std) * math.sqrt(252)
-    else:
-        sharpe = 0.0
+    total_signals = sum(int(r["shadow_signals"]) for r in rows)
+    total_actual  = sum(int(r["actual_trades"])  for r in rows)
+    active_days   = sum(1 for r in rows if int(r["shadow_signals"]) > 0)
 
     print("\n" + "=" * 55)
-    print("       30-DAY PAPER TRADING BACKTEST — FINAL REPORT")
+    print("       30-DAY LIVE SHADOW BACKTEST — FINAL REPORT")
     print("=" * 55)
-    print(f"  Period:          {rows[0]['date']}  →  {rows[-1]['date']}")
-    print(f"  Active days:     {trading_days} / {len(rows)}")
-    print(f"  Total trades:    {total_trades}")
-    print(f"  Win rate:        {win_rate:.1%}")
-    print(f"  Total P&L:       ${total_pnl:,.2f}")
-    print(f"  Total return:    {total_pnl / ACCOUNT * 100:.2f}%")
-    print(f"  Max drawdown:    {max_dd * 100:.2f}%")
-    print(f"  Sharpe ratio:    {sharpe:.2f}")
+    print(f"  Period:           {rows[0]['date']}  →  {rows[-1]['date']}")
+    print(f"  Active days:      {active_days} / {len(rows)}")
+    print(f"  Total signals:    {total_signals}")
+    print(f"  Total live trades:{total_actual}")
+    print(f"  Avg signals/day:  {total_signals / max(active_days, 1):.1f}")
     print("=" * 55)
-    print(f"\nFull daily breakdown saved to: {SUMMARY_FILE}")
+    print(f"\nFull breakdown: {SUMMARY_FILE}")
+    print("Per-day signals + actual trades: backtest/daily/")
 
-    if total_pnl > 0 and max_dd < 0.15 and sharpe > 1.0:
-        print("\n✅ Results look solid. Consider switching to live trading.")
-        print("   In broker/alpaca.py: change paper=True to paper=False.")
-    else:
-        print("\n⚠️  Results need more tuning before going live.")
-        if max_dd >= 0.15:
-            print(f"   Max drawdown {max_dd*100:.1f}% is above 15% target.")
-        if sharpe < 1.0:
-            print(f"   Sharpe {sharpe:.2f} is below 1.0 target.")
-        if total_pnl <= 0:
-            print("   Strategy was not profitable over this period.")
 
+# ── main ──────────────────────────────────────────────────────────────────────
 
 def main():
     api_key    = os.environ.get("ALPACA_API_KEY")
@@ -205,53 +325,66 @@ def main():
         print("ERROR: Set ALPACA_API_KEY and ALPACA_SECRET_KEY environment variables.")
         sys.exit(1)
 
-    state = load_state()
-    today = last_trading_day()
+    state   = load_state()
+    today   = today_et()
 
-    # ── initialize on first run ───────────────────────────────────────────────
-    if not state:
-        state = {
-            "start_date": today.isoformat(),
-            "current_day": 1,
-            "last_run": None,
-            "completed": False,
-        }
-        print(f"Starting 30-day paper trading backtest period. Day 1 of {PERIOD_DAYS}.")
-        print(f"Start date: {today}\n")
+    # ── guard: skip weekends ──────────────────────────────────────────────────
+    if today.weekday() >= 5:
+        print(f"Today is a weekend. No market. Exiting.")
+        return
 
+    # ── guard: already ran today ──────────────────────────────────────────────
+    if state.get("last_run") == today.isoformat():
+        print(f"Shadow runner already completed for {today}. Exiting.")
+        if state.get("completed"):
+            print_30day_report()
+        return
+
+    # ── guard: 30-day period complete ─────────────────────────────────────────
     if state.get("completed"):
-        print("30-day period already completed. See backtest/30day_summary.csv for results.")
+        print("30-day period complete.")
         print_30day_report()
         return
 
-    # ── skip if already ran today ─────────────────────────────────────────────
-    if state.get("last_run") == today.isoformat():
-        print(f"Already ran for {today}. Next run tomorrow.")
-        return
+    # ── initialize ────────────────────────────────────────────────────────────
+    if not state:
+        state = {"start_date": today.isoformat(), "current_day": 1,
+                 "last_run": None, "completed": False}
+        print(f"Starting 30-day live shadow period. Day 1 of {PERIOD_DAYS}.")
 
     day_num = state["current_day"]
-    print(f"{'='*55}")
+    print(f"\n{'='*55}")
     print(f" Day {day_num} of {PERIOD_DAYS}  |  {today.strftime('%A, %B %d %Y')}")
     print(f"{'='*55}")
 
-    # ── run the backtest for today ────────────────────────────────────────────
-    trades, summary = run_day(today, api_key, secret_key)
+    # ── wait for market open ──────────────────────────────────────────────────
+    print("\nWaiting for market open (9:30am ET)...")
+    wait_for_market_open()
+    print(f"Market is open. Shadow runner active. Watching: {SYMBOLS}\n")
 
-    # ── save per-day trade log ────────────────────────────────────────────────
-    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-    day_file = RESULTS_DIR / f"day{day_num:02d}_{today.isoformat()}.csv"
-    save_trades(trades, str(day_file))
+    # ── start shadow stream ───────────────────────────────────────────────────
+    runner = ShadowRunner(api_key, secret_key)
+    runner.start()
 
-    # ── print today's summary ─────────────────────────────────────────────────
-    print(f"\n  Day {day_num} results:")
-    for k, v in summary.items():
-        print(f"    {k}: {v}")
+    # ── run until market close ────────────────────────────────────────────────
+    while is_market_open():
+        time.sleep(15)
 
-    # ── append to running summary ─────────────────────────────────────────────
-    append_to_summary(day_num, today, summary, len(trades))
+    print("\nMarket closed. Stopping stream...")
+    runner.stop()
+    time.sleep(3)  # let final bars flush
+
+    # ── fetch actual live bot trades from Alpaca ──────────────────────────────
+    print("Fetching actual paper trades from Alpaca...")
+    actual_trades = fetch_actual_trades(api_key, secret_key, today)
+    print(f"  {len(actual_trades)} order(s) filled today.")
+
+    # ── compare and save ──────────────────────────────────────────────────────
+    summary_row = compare_and_report(runner.signal_log, actual_trades, day_num, today)
+    append_to_summary(summary_row)
 
     # ── update state ──────────────────────────────────────────────────────────
-    state["last_run"]   = today.isoformat()
+    state["last_run"]    = today.isoformat()
     state["current_day"] = day_num + 1
 
     if day_num >= PERIOD_DAYS:
@@ -260,9 +393,7 @@ def main():
         print_30day_report()
     else:
         save_state(state)
-        remaining = PERIOD_DAYS - day_num
-        print(f"\n  {remaining} day(s) remaining in the 30-day period.")
-        print(f"  Next run: tomorrow after market close.")
+        print(f"\n  {PERIOD_DAYS - day_num} day(s) remaining. See you tomorrow at market open.")
 
 
 if __name__ == "__main__":
