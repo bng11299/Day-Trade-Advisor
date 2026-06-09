@@ -38,7 +38,18 @@ from strategies.base import Direction
 import pandas as pd
 
 # ── configuration ─────────────────────────────────────────────────────────────
-SYMBOLS     = ["NVDA", "TSLA"]
+_WATCHLIST_FILE = ROOT / "watchlist.json"
+_FALLBACK_SYMBOLS = ["NVDA", "TSLA"]
+
+def _load_symbols() -> list[str]:
+    if _WATCHLIST_FILE.exists():
+        with open(_WATCHLIST_FILE) as f:
+            syms = json.load(f)
+        if syms:
+            return syms
+    return _FALLBACK_SYMBOLS
+
+SYMBOLS     = _load_symbols()
 ACCOUNT     = 100_000.0
 LONG_ONLY   = True
 PERIOD_DAYS = 30

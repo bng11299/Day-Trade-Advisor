@@ -1,77 +1,56 @@
-# schedule.ps1 — registers the daily backtest as a Windows Task Scheduler job.
+# schedule.ps1 - registers two Task Scheduler jobs:
+#   1. DayTradeBot-Screener      - 9:15am ET weekdays: screens SP500, writes watchlist.json
+#   2. DayTradeBot-DailyBacktest - 9:25am ET weekdays: shadow runner (reads watchlist.json)
 #
-# Run once (as administrator not required — runs under your own user account):
+# Run once:
 #     powershell -ExecutionPolicy Bypass -File "C:\Users\Browndan\Documents\DayTradeBot\scripts\schedule.ps1"
 #
-# To remove the task later:
+# To remove tasks:
+#     Unregister-ScheduledTask -TaskName "DayTradeBot-Screener"      -Confirm:$false
 #     Unregister-ScheduledTask -TaskName "DayTradeBot-DailyBacktest" -Confirm:$false
 
-$TaskName   = "DayTradeBot-DailyBacktest"
-$BotRoot    = "C:\Users\Browndan\Documents\DayTradeBot"
-$ScriptPath = "$BotRoot\scripts\daily_backtest.py"
-$LogPath    = "$BotRoot\scripts\daily_backtest.log"
-$Python     = (Get-Command python).Source
+$BotRoot     = "C:\Users\Browndan\Documents\DayTradeBot"
+$Python      = (Get-Command python).Source
+$ScreenerLog = "$BotRoot\scripts\screener.log"
+$BacktestLog = "$BotRoot\scripts\daily_backtest.log"
 
-# ── read API keys from current session or prompt ──────────────────────────────
 $ApiKey    = $env:ALPACA_API_KEY
 $SecretKey = $env:ALPACA_SECRET_KEY
 
-if (-not $ApiKey) {
-    $ApiKey    = Read-Host "Enter ALPACA_API_KEY"
-}
-if (-not $SecretKey) {
-    $SecretKey = Read-Host "Enter ALPACA_SECRET_KEY"
-}
+if (-not $ApiKey)    { $ApiKey    = Read-Host "Enter ALPACA_API_KEY" }
+if (-not $SecretKey) { $SecretKey = Read-Host "Enter ALPACA_SECRET_KEY" }
 
-# ── build the command that Task Scheduler will run ────────────────────────────
-# Sets env vars inline so the task doesn't depend on user session variables.
-$Command = @"
-`$env:ALPACA_API_KEY = '$ApiKey'; `$env:ALPACA_SECRET_KEY = '$SecretKey'; & '$Python' '$ScriptPath' >> '$LogPath' 2>&1
-"@
+function Register-BotTask($TaskName, $ScriptPath, $LogPath, $TriggerTime, $Description, $TimeoutMin) {
+    $Command  = '$env:ALPACA_API_KEY = ''' + $ApiKey + '''; $env:ALPACA_SECRET_KEY = ''' + $SecretKey + '''; & ''' + $Python + ''' ''' + $ScriptPath + ''' >> ''' + $LogPath + ''' 2>&1'
+    $Action   = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NonInteractive -ExecutionPolicy Bypass -Command `"$Command`""
+    $Trigger  = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Monday,Tuesday,Wednesday,Thursday,Friday -At $TriggerTime
+    $Settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes $TimeoutMin) -MultipleInstances IgnoreNew -StartWhenAvailable
 
-$Action = New-ScheduledTaskAction `
-    -Execute "powershell.exe" `
-    -Argument "-NonInteractive -ExecutionPolicy Bypass -Command `"$Command`""
+    $Existing = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+    if ($Existing) {
+        Write-Host "Task '$TaskName' already exists - replacing."
+        Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
+    }
 
-# ── trigger: weekdays at 5:00pm (after market close at 4pm ET) ───────────────
-$Trigger = New-ScheduledTaskTrigger `
-    -Weekly `
-    -DaysOfWeek Monday, Tuesday, Wednesday, Thursday, Friday `
-    -At "5:00PM"
-
-# ── settings: run even if on battery, skip if already running ────────────────
-$Settings = New-ScheduledTaskSettingsSet `
-    -ExecutionTimeLimit (New-TimeSpan -Minutes 30) `
-    -MultipleInstances IgnoreNew `
-    -StartWhenAvailable   # catches up if machine was off at trigger time
-
-# ── register ──────────────────────────────────────────────────────────────────
-$Existing = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
-if ($Existing) {
-    Write-Host "Task '$TaskName' already exists — updating it."
-    Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
+    Register-ScheduledTask -TaskName $TaskName -Action $Action -Trigger $Trigger -Settings $Settings -RunLevel Limited -Description $Description | Out-Null
+    Write-Host "Registered: $TaskName  (fires at $TriggerTime weekdays)"
 }
 
-Register-ScheduledTask `
-    -TaskName $TaskName `
-    -Action   $Action `
-    -Trigger  $Trigger `
-    -Settings $Settings `
-    -RunLevel Limited `
-    -Description "Runs the DayTradeBot daily backtest each weekday at 5pm. 30-day paper trading evaluation period." | Out-Null
+Register-BotTask "DayTradeBot-Screener" "$BotRoot\scripts\screener.py" $ScreenerLog "9:15AM" "Screens SP500 for high-ATR/volume names. Writes watchlist.json before market open." 10
+Register-BotTask "DayTradeBot-DailyBacktest" "$BotRoot\scripts\daily_backtest.py" $BacktestLog "9:25AM" "Live shadow runner: logs strategy signals during market hours, compares to actual fills at close." 420
 
 Write-Host ""
-Write-Host "Task '$TaskName' registered successfully."
-Write-Host "  Runs:    Weekdays at 5:00 PM"
-Write-Host "  Script:  $ScriptPath"
-Write-Host "  Log:     $LogPath"
-Write-Host "  Catches missed days when machine comes back on."
+Write-Host "Both tasks registered. Daily schedule:"
+Write-Host "  9:15am ET  - Screener writes top-10 symbols to watchlist.json"
+Write-Host "  9:25am ET  - Shadow runner starts watching those symbols"
+Write-Host "  4:00pm ET  - Shadow runner compares signals to actual fills and exits"
 Write-Host ""
-Write-Host "To run immediately (test):"
-Write-Host "  Start-ScheduledTask -TaskName '$TaskName'"
+Write-Host "Useful commands:"
+Write-Host "  Start-ScheduledTask -TaskName 'DayTradeBot-Screener'"
+Write-Host "  Start-ScheduledTask -TaskName 'DayTradeBot-DailyBacktest'"
+Write-Host "  Get-Content '$ScreenerLog' -Tail 30"
+Write-Host "  Get-Content '$BacktestLog' -Tail 50 -Wait"
 Write-Host ""
-Write-Host "To view the log:"
-Write-Host "  Get-Content '$LogPath' -Tail 50"
-Write-Host ""
-Write-Host "To remove the task:"
-Write-Host "  Unregister-ScheduledTask -TaskName '$TaskName' -Confirm:`$false"
+Write-Host "To remove tasks:"
+Write-Host "  Unregister-ScheduledTask -TaskName 'DayTradeBot-Screener'      -Confirm:`$false"
+Write-Host "  Unregister-ScheduledTask -TaskName 'DayTradeBot-DailyBacktest' -Confirm:`$false"
