@@ -14,6 +14,7 @@ import pandas as pd
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
+from alpaca.data.enums import DataFeed
 from alpaca.data.live import StockDataStream
 
 
@@ -41,7 +42,8 @@ def fetch_bars(
     """
     Fetch historical bars from Alpaca for backtesting.
     Returns a DataFrame with columns: Open, High, Low, Close, Volume.
-    Alpaca free tier provides years of historical data.
+    Uses the IEX feed (free tier compatible). Upgrade to DataFeed.SIP
+    for full market data if you have an Alpaca paid subscription.
     """
     api_key = api_key or os.environ["ALPACA_API_KEY"]
     secret_key = secret_key or os.environ["ALPACA_SECRET_KEY"]
@@ -52,6 +54,7 @@ def fetch_bars(
         timeframe=_timeframe(interval),
         start=datetime.strptime(start, "%Y-%m-%d").replace(tzinfo=timezone.utc),
         end=datetime.strptime(end, "%Y-%m-%d").replace(tzinfo=timezone.utc),
+        feed=DataFeed.IEX,   # free-tier compatible; change to DataFeed.SIP with paid plan
     )
     bars = client.get_stock_bars(request)
     df = bars.df
