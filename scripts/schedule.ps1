@@ -1,6 +1,12 @@
 # schedule.ps1 - registers two Task Scheduler jobs:
-#   1. DayTradeBot-Screener      - 9:15am ET weekdays: screens SP500, writes watchlist.json
-#   2. DayTradeBot-DailyBacktest - 9:25am ET weekdays: shadow runner (reads watchlist.json)
+#   1. DayTradeBot-Screener      - 9:15pm SGT weekdays (= 9:15am ET): screens SP500, writes watchlist.json
+#   2. DayTradeBot-DailyBacktest - 9:25pm SGT weekdays (= 9:25am ET): shadow runner (reads watchlist.json)
+#
+# Times are in Singapore Time (SGT = UTC+8). US markets open at 9:30pm SGT, close at 4:00am SGT.
+# If you move to a different timezone, adjust trigger times accordingly:
+#   ET (UTC-4 EDT):  9:15am / 9:25am
+#   SGT (UTC+8):     9:15pm / 9:25pm
+#   GMT (UTC+0):     1:15pm / 1:25pm
 #
 # Run once:
 #     powershell -ExecutionPolicy Bypass -File "C:\Users\Browndan\Documents\DayTradeBot\scripts\schedule.ps1"
@@ -36,14 +42,14 @@ function Register-BotTask($TaskName, $ScriptPath, $LogPath, $TriggerTime, $Descr
     Write-Host "Registered: $TaskName  (fires at $TriggerTime weekdays)"
 }
 
-Register-BotTask "DayTradeBot-Screener" "$BotRoot\scripts\screener.py" $ScreenerLog "9:15AM" "Screens SP500 for high-ATR/volume names. Writes watchlist.json before market open." 10
-Register-BotTask "DayTradeBot-DailyBacktest" "$BotRoot\scripts\daily_backtest.py" $BacktestLog "9:25AM" "Live shadow runner: logs strategy signals during market hours, compares to actual fills at close." 420
+Register-BotTask "DayTradeBot-Screener" "$BotRoot\scripts\screener.py" $ScreenerLog "9:15PM" "Screens SP500 for high-ATR/volume names. Writes watchlist.json before market open." 10
+Register-BotTask "DayTradeBot-DailyBacktest" "$BotRoot\scripts\daily_backtest.py" $BacktestLog "9:25PM" "Live shadow runner: logs strategy signals during market hours, compares to actual fills at close." 420
 
 Write-Host ""
-Write-Host "Both tasks registered. Daily schedule:"
-Write-Host "  9:15am ET  - Screener writes top-10 symbols to watchlist.json"
-Write-Host "  9:25am ET  - Shadow runner starts watching those symbols"
-Write-Host "  4:00pm ET  - Shadow runner compares signals to actual fills and exits"
+Write-Host "Both tasks registered. Daily schedule (Singapore Time, SGT = UTC+8):"
+Write-Host "  9:15pm SGT - Screener writes top-15 symbols to watchlist.json  (= 9:15am ET)"
+Write-Host "  9:25pm SGT - Shadow runner starts watching those symbols        (= 9:25am ET)"
+Write-Host "  4:00am SGT - Shadow runner compares signals to actual fills and exits (next morning)"
 Write-Host ""
 Write-Host "Useful commands:"
 Write-Host "  Start-ScheduledTask -TaskName 'DayTradeBot-Screener'"
