@@ -16,7 +16,7 @@
 #     Unregister-ScheduledTask -TaskName "DayTradeBot-DailyBacktest" -Confirm:$false
 
 $BotRoot     = "C:\Users\Browndan\Documents\DayTradeBot"
-$Python      = (Get-Command python).Source
+$Python      = "C:\Users\Browndan\AppData\Local\Programs\Python\Python313\python.exe"
 $ScreenerLog = "$BotRoot\scripts\screener.log"
 $BacktestLog = "$BotRoot\scripts\daily_backtest.log"
 
@@ -43,7 +43,7 @@ function Register-BotTask($TaskName, $ScriptPath, $LogPath, $TriggerTime, $Descr
 }
 
 Register-BotTask "DayTradeBot-Screener" "$BotRoot\scripts\screener.py" $ScreenerLog "9:15PM" "Screens SP500 for high-ATR/volume names. Writes watchlist.json before market open." 10
-Register-BotTask "DayTradeBot-DailyBacktest" "$BotRoot\scripts\daily_backtest.py" $BacktestLog "9:25PM" "Live shadow runner: logs strategy signals during market hours, compares to actual fills at close." 420
+Register-BotTask "DayTradeBot-DailyBacktest" "$BotRoot\scripts\daily_backtest.py" $BacktestLog "9:25PM" "Live shadow runner: logs strategy signals during market hours, compares to actual fills at close." 600
 
 Write-Host ""
 Write-Host "Both tasks registered. Daily schedule (Singapore Time, SGT = UTC+8):"
