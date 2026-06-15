@@ -1,13 +1,13 @@
 """
-Live shadow runner — runs during market hours alongside the live bot.
+Live shadow runner - runs during market hours alongside the live bot.
 
 For each bar received from the Alpaca stream, it runs the full strategy stack
 and logs what it WOULD do. At market close it pulls actual paper trades from
 Alpaca and compares signal vs execution, exposing slippage, missed fills, or
 strategy drift. Results are saved per-day and rolled into a 30-day summary.
 
-Triggered at 9:30am ET by Task Scheduler (see scripts/schedule.ps1).
-Runs until market close (~4pm ET), then saves the day's report and exits.
+Triggered at 9:25pm SGT (= 9:25am ET) by Task Scheduler (see scripts/schedule.ps1).
+Runs until market close (~4pm ET / 4am SGT), then saves the day's report and exits.
 
 Run manually (will wait for market hours if run early):
     python scripts/daily_backtest.py
@@ -37,7 +37,7 @@ from backtest.runner import summarize
 from strategies.base import Direction
 import pandas as pd
 
-# ── configuration ─────────────────────────────────────────────────────────────
+# -- configuration -------------------------------------------------------------
 _WATCHLIST_FILE = ROOT / "watchlist.json"
 _FALLBACK_SYMBOLS = ["NVDA", "TSLA"]
 
@@ -64,7 +64,7 @@ RESULTS_DIR  = ROOT / "backtest" / "daily"
 SUMMARY_FILE = ROOT / "backtest" / "30day_summary.csv"
 
 
-# ── state helpers ─────────────────────────────────────────────────────────────
+# -- state helpers -------------------------------------------------------------
 
 def load_state() -> dict:
     if STATE_FILE.exists():
@@ -91,7 +91,7 @@ def is_market_open() -> bool:
     now = now_et()
     if now.weekday() >= 5:
         return False
-    after_open  = (now.hour, now.minute) >= MARKET_OPEN
+    after_open   = (now.hour, now.minute) >= MARKET_OPEN
     before_close = (now.hour, now.minute) < MARKET_CLOSE
     return after_open and before_close
 
@@ -101,7 +101,7 @@ def wait_for_market_open():
     while not is_market_open():
         now = now_et()
         if now.weekday() >= 5:
-            print(f"  Weekend — market opens Monday. Checking again in 1 hour.")
+            print(f"  Weekend - market opens Monday. Checking again in 1 hour.")
             time.sleep(3600)
             continue
         open_today = now.replace(hour=MARKET_OPEN[0], minute=MARKET_OPEN[1], second=0)
@@ -115,13 +115,13 @@ def wait_for_market_open():
             sys.exit(0)
 
 
-# ── shadow signal logger ──────────────────────────────────────────────────────
+# -- shadow signal logger ------------------------------------------------------
 
 class ShadowRunner:
     """
     Subscribes to the same Alpaca bar stream as the live bot.
     On every bar: runs the strategy, logs the signal and what trade it would place.
-    Does NOT submit orders — observation only.
+    Does NOT submit orders - observation only.
     """
 
     def __init__(self, api_key: str, secret_key: str):
@@ -164,17 +164,17 @@ class ShadowRunner:
             params = self.risk_mgr.calculate(sym, df, agg.direction)
 
         entry = {
-            "time":       bar.timestamp.isoformat(),
-            "symbol":     sym,
-            "close":      bar.close,
-            "signal":     agg.direction.value,
-            "confidence": agg.confidence,
-            "reason":     str(agg),
-            "would_entry":     params.entry      if params else None,
-            "would_stop":      params.stop_loss  if params else None,
-            "would_target":    params.take_profit if params else None,
-            "would_shares":    params.shares     if params else None,
-            "would_risk":      params.risk_amount if params else None,
+            "time":          bar.timestamp.isoformat(),
+            "symbol":        sym,
+            "close":         bar.close,
+            "signal":        agg.direction.value,
+            "confidence":    agg.confidence,
+            "reason":        str(agg),
+            "would_entry":   params.entry       if params else None,
+            "would_stop":    params.stop_loss   if params else None,
+            "would_target":  params.take_profit if params else None,
+            "would_shares":  params.shares      if params else None,
+            "would_risk":    params.risk_amount if params else None,
         }
         self.signal_log.append(entry)
 
@@ -201,7 +201,7 @@ class ShadowRunner:
             )
 
 
-# ── alpaca trade fetcher ──────────────────────────────────────────────────────
+# -- alpaca trade fetcher ------------------------------------------------------
 
 def fetch_actual_trades(api_key: str, secret_key: str, target_date: date) -> list[dict]:
     """Pull completed paper orders from Alpaca for the given date."""
@@ -220,17 +220,17 @@ def fetch_actual_trades(api_key: str, secret_key: str, target_date: date) -> lis
         if filled_date != target_date:
             continue
         trades.append({
-            "time":      o.filled_at.isoformat(),
-            "symbol":    o.symbol,
-            "side":      o.side.value,
-            "qty":       float(o.qty),
+            "time":       o.filled_at.isoformat(),
+            "symbol":     o.symbol,
+            "side":       o.side.value,
+            "qty":        float(o.qty),
             "fill_price": float(o.filled_avg_price) if o.filled_avg_price else None,
-            "status":    o.status.value,
+            "status":     o.status.value,
         })
     return trades
 
 
-# ── comparison report ─────────────────────────────────────────────────────────
+# -- comparison report ---------------------------------------------------------
 
 def compare_and_report(signal_log: list[dict], actual_trades: list[dict],
                        day_num: int, target_date: date) -> dict:
@@ -268,18 +268,18 @@ def compare_and_report(signal_log: list[dict], actual_trades: list[dict],
         total   = max(shadow_buys + shadow_sells, actual_buys + actual_sells)
         alignment = f"{matched / total:.0%}" if total else "N/A"
 
-    print(f"\n  {'─'*45}")
+    print(f"\n  {'-'*45}")
     print(f"  Day {day_num} wrap-up  |  {target_date.strftime('%A %b %d')}")
-    print(f"  {'─'*45}")
-    print(f"  Shadow signals  — BUY: {shadow_buys}  SELL: {shadow_sells}")
-    print(f"  Live bot trades — BUY: {actual_buys}  SELL: {actual_sells}")
+    print(f"  {'-'*45}")
+    print(f"  Shadow signals  - BUY: {shadow_buys}  SELL: {shadow_sells}")
+    print(f"  Live bot trades - BUY: {actual_buys}  SELL: {actual_sells}")
     print(f"  Signal alignment: {alignment}")
-    print(f"  Signal log  → {sig_file.name}")
-    print(f"  Actual trades → {act_file.name}")
+    print(f"  Signal log    -> {sig_file.name}")
+    print(f"  Actual trades -> {act_file.name}")
 
     return {
-        "day":           day_num,
-        "date":          target_date.isoformat(),
+        "day":            day_num,
+        "date":           target_date.isoformat(),
         "shadow_signals": shadow_buys + shadow_sells,
         "actual_trades":  actual_buys + actual_sells,
         "alignment":      alignment,
@@ -287,7 +287,7 @@ def compare_and_report(signal_log: list[dict], actual_trades: list[dict],
     }
 
 
-# ── 30-day summary ────────────────────────────────────────────────────────────
+# -- 30-day summary ------------------------------------------------------------
 
 def append_to_summary(row: dict):
     SUMMARY_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -315,19 +315,19 @@ def print_30day_report():
     active_days   = sum(1 for r in rows if int(r["shadow_signals"]) > 0)
 
     print("\n" + "=" * 55)
-    print("       30-DAY LIVE SHADOW BACKTEST — FINAL REPORT")
+    print("       30-DAY LIVE SHADOW BACKTEST - FINAL REPORT")
     print("=" * 55)
-    print(f"  Period:           {rows[0]['date']}  →  {rows[-1]['date']}")
-    print(f"  Active days:      {active_days} / {len(rows)}")
-    print(f"  Total signals:    {total_signals}")
-    print(f"  Total live trades:{total_actual}")
-    print(f"  Avg signals/day:  {total_signals / max(active_days, 1):.1f}")
+    print(f"  Period:        {rows[0]['date']}  to  {rows[-1]['date']}")
+    print(f"  Active days:   {active_days} / {len(rows)}")
+    print(f"  Total signals: {total_signals}")
+    print(f"  Total trades:  {total_actual}")
+    print(f"  Avg signals/day: {total_signals / max(active_days, 1):.1f}")
     print("=" * 55)
     print(f"\nFull breakdown: {SUMMARY_FILE}")
     print("Per-day signals + actual trades: backtest/daily/")
 
 
-# ── main ──────────────────────────────────────────────────────────────────────
+# -- main ----------------------------------------------------------------------
 
 def main():
     api_key    = os.environ.get("ALPACA_API_KEY")
@@ -336,28 +336,28 @@ def main():
         print("ERROR: Set ALPACA_API_KEY and ALPACA_SECRET_KEY environment variables.")
         sys.exit(1)
 
-    state   = load_state()
-    today   = today_et()
+    state = load_state()
+    today = today_et()
 
-    # ── guard: skip weekends ──────────────────────────────────────────────────
+    # guard: skip weekends
     if today.weekday() >= 5:
         print(f"Today is a weekend. No market. Exiting.")
         return
 
-    # ── guard: already ran today ──────────────────────────────────────────────
+    # guard: already ran today
     if state.get("last_run") == today.isoformat():
         print(f"Shadow runner already completed for {today}. Exiting.")
         if state.get("completed"):
             print_30day_report()
         return
 
-    # ── guard: 30-day period complete ─────────────────────────────────────────
+    # guard: 30-day period complete
     if state.get("completed"):
         print("30-day period complete.")
         print_30day_report()
         return
 
-    # ── initialize ────────────────────────────────────────────────────────────
+    # initialize
     if not state:
         state = {"start_date": today.isoformat(), "current_day": 1,
                  "last_run": None, "completed": False}
@@ -368,16 +368,16 @@ def main():
     print(f" Day {day_num} of {PERIOD_DAYS}  |  {today.strftime('%A, %B %d %Y')}")
     print(f"{'='*55}")
 
-    # ── wait for market open ──────────────────────────────────────────────────
-    print("\nWaiting for market open (9:30am ET)...")
+    # wait for market open
+    print("\nWaiting for market open (9:30am ET / 9:30pm SGT)...")
     wait_for_market_open()
     print(f"Market is open. Shadow runner active. Watching: {SYMBOLS}\n")
 
-    # ── start shadow stream ───────────────────────────────────────────────────
+    # start shadow stream
     runner = ShadowRunner(api_key, secret_key)
     runner.start()
 
-    # ── run until market close ────────────────────────────────────────────────
+    # run until market close
     while is_market_open():
         time.sleep(15)
 
@@ -385,16 +385,16 @@ def main():
     runner.stop()
     time.sleep(3)  # let final bars flush
 
-    # ── fetch actual live bot trades from Alpaca ──────────────────────────────
+    # fetch actual live bot trades from Alpaca
     print("Fetching actual paper trades from Alpaca...")
     actual_trades = fetch_actual_trades(api_key, secret_key, today)
     print(f"  {len(actual_trades)} order(s) filled today.")
 
-    # ── compare and save ──────────────────────────────────────────────────────
+    # compare and save
     summary_row = compare_and_report(runner.signal_log, actual_trades, day_num, today)
     append_to_summary(summary_row)
 
-    # ── update state ──────────────────────────────────────────────────────────
+    # update state
     state["last_run"]    = today.isoformat()
     state["current_day"] = day_num + 1
 
@@ -404,7 +404,7 @@ def main():
         print_30day_report()
     else:
         save_state(state)
-        print(f"\n  {PERIOD_DAYS - day_num} day(s) remaining. See you tomorrow at market open.")
+        print(f"\n  {PERIOD_DAYS - day_num} day(s) remaining. See you tomorrow.")
 
 
 if __name__ == "__main__":
