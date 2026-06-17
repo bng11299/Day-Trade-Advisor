@@ -73,11 +73,15 @@ def fetch_bars(
 
 class LiveBarStream:
     """
-    Real-time 1-minute bar stream from Alpaca WebSocket.
-    Maintains a rolling DataFrame of the last `buffer` bars per symbol.
+    Real-time bar stream from Alpaca WebSocket, aggregated to 5-minute bars.
+    Alpaca delivers 1-minute bars; we aggregate to 5-minute windows (aligning
+    on clock boundaries: 9:30-9:34 → emits at 9:34, 9:35-9:39 → emits at 9:39, etc.)
+    so the strategy sees the same timeframe used in the backtester.
+
+    Maintains a rolling DataFrame of the last `buffer` 5-minute bars per symbol.
     Call `subscribe(symbols, callback)` then `start()`.
 
-    callback(symbol: str, df: pd.DataFrame) is called on each new bar.
+    callback(symbol: str, df: pd.DataFrame) is called on each completed 5-min bar.
     df contains the rolling window so strategies can analyze it immediately.
     """
 
@@ -91,6 +95,7 @@ class LiveBarStream:
         self.secret_key = secret_key or os.environ["ALPACA_SECRET_KEY"]
         self.buffer = buffer
         self._buffers: dict[str, deque] = {}
+        self._bar_accum: dict[str, list] = {}   # accumulate 1-min bars into 5-min windows
         self._callback: Callable | None = None
         self._stream: StockDataStream | None = None
         self._thread: threading.Thread | None = None
@@ -99,11 +104,13 @@ class LiveBarStream:
         for sym in symbols:
             if sym not in self._buffers:
                 self._buffers[sym] = deque(maxlen=self.buffer)
+                self._bar_accum[sym] = []
         self._callback = callback
 
     def add_symbol(self, symbol: str):
         if symbol not in self._buffers:
             self._buffers[symbol] = deque(maxlen=self.buffer)
+            self._bar_accum[symbol] = []
             if self._stream and self._loop:
                 self._loop.call_soon_threadsafe(
                     self._stream.subscribe_bars, self._on_bar, symbol
@@ -111,18 +118,32 @@ class LiveBarStream:
 
     def remove_symbol(self, symbol: str):
         self._buffers.pop(symbol, None)
+        self._bar_accum.pop(symbol, None)
 
     async def _on_bar(self, bar):
         sym = bar.symbol
         if sym not in self._buffers:
             return
 
+        minute = bar.timestamp.minute
+
+        # Start of a new 5-minute clock window — reset accumulator
+        if minute % 5 == 0:
+            self._bar_accum[sym] = []
+
+        self._bar_accum[sym].append(bar)
+
+        # Emit only on the last minute of the window (:04, :09, :14, ...)
+        if minute % 5 != 4:
+            return
+
+        window = self._bar_accum[sym]
         row = {
-            "Open": bar.open,
-            "High": bar.high,
-            "Low": bar.low,
-            "Close": bar.close,
-            "Volume": bar.volume,
+            "Open":   window[0].open,
+            "High":   max(b.high   for b in window),
+            "Low":    min(b.low    for b in window),
+            "Close":  window[-1].close,
+            "Volume": sum(b.volume for b in window),
         }
         self._buffers[sym].append((bar.timestamp, row))
 

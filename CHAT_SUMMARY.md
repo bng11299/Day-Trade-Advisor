@@ -164,6 +164,7 @@ At market close, pulls actual paper fills from Alpaca and compares.
 
 **State tracking:** `scripts/state.json` -- tracks current day number and last run date.
 If this file is missing, the runner resets to Day 1. Current state: Day 4, started 2026-06-11.
+Day 4 runs tonight (June 16 SGT / June 16 ET). Days 1-3 signal data is in backtest/daily/.
 
 **Go-live criteria (Day 30 auto-check):**
 - Sharpe > 1.0
@@ -246,12 +247,13 @@ powershell -ExecutionPolicy Bypass -File "scripts\schedule.ps1"
 | Issue | Status | Notes |
 |---|---|---|
 | Multiple Python installs on machine | Fixed | Hardcoded Python313 path in schedule.ps1 |
-| Unicode chars crash Windows console | Fixed | All box-drawing chars replaced with ASCII in daily_backtest.py and screener.py |
+| Unicode chars crash Windows console | Fixed | All box-drawing chars replaced with ASCII in daily_backtest.py and screener.py. One `─` in compare_and_report was missed — caused days 1-3 to crash after writing the signal CSV but before saving state. Now fixed; day01 filenames for June 12 and June 15 were renamed to day02/day03. |
 | state.json missing resets day count | Fixed | state.json recreated; daily_backtest.py saves it at end of each day |
-| 30day_summary.csv had duplicate Day 1 zeros | Known | Was caused by Unicode crash before append_to_summary ran. Will self-correct as new days complete. |
+| 30day_summary.csv had wrong schema + stale data | Fixed | Shadow runner schema (day/date/shadow_signals/actual_trades/alignment/total_bars) replaced the old backtester schema; days 1-3 backfilled from signal CSVs. |
 | Shadow runner timeout too short | Fixed | Bumped to 600 min (10 hrs) |
 | `gh` not on PATH after winget install | Open | Use full path `C:\Program Files\GitHub CLI\gh.exe` |
 | IEX feed lower volume coverage than SIP | By design | Upgrade to DataFeed.SIP with paid Alpaca plan |
+| 1-min bars vs 5-min backtest mismatch | Fixed (Day 5+) | Alpaca streams 1-min bars but strategy was tuned on 5-min bars. Both shadow runner and live bot now aggregate 1-min bars into 5-min windows before running strategy, matching the backtester. Days 1-4 signal data reflects the old 1-min behavior (would_entry always empty due to ATR filter). |
 | MU ticker shows ~$900-1000 price | Real data | Micron has had a large bull run; price sanity filter confirmed data is consistent |
 
 ---

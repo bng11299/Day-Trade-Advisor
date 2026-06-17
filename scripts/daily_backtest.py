@@ -120,8 +120,10 @@ def wait_for_market_open():
 class ShadowRunner:
     """
     Subscribes to the same Alpaca bar stream as the live bot.
-    On every bar: runs the strategy, logs the signal and what trade it would place.
-    Does NOT submit orders - observation only.
+    Aggregates 1-minute bars into 5-minute bars (matching the backtester timeframe)
+    before running the strategy.  On every completed 5-min bar: runs the full
+    strategy stack and logs the signal and what trade it would place.
+    Does NOT submit orders — observation only.
     """
 
     def __init__(self, api_key: str, secret_key: str):
@@ -130,6 +132,7 @@ class ShadowRunner:
         self.aggregator = SignalAggregator(long_only=LONG_ONLY)
         self.risk_mgr   = RiskManager(account_value=ACCOUNT)
         self.buffers: dict[str, deque] = {s: deque(maxlen=BAR_BUFFER) for s in SYMBOLS}
+        self.bar_accum: dict[str, list] = {s: [] for s in SYMBOLS}  # 1-min → 5-min aggregation
         self.signal_log: list[dict] = []
         self._stream: StockDataStream | None = None
         self._thread: threading.Thread | None = None
@@ -140,12 +143,25 @@ class ShadowRunner:
         if sym not in self.buffers:
             return
 
+        minute = bar.timestamp.minute
+
+        # Start of a new 5-minute clock window — reset accumulator
+        if minute % 5 == 0:
+            self.bar_accum[sym] = []
+
+        self.bar_accum[sym].append(bar)
+
+        # Emit only on the last minute of the window (:04, :09, :14, ...)
+        if minute % 5 != 4:
+            return
+
+        window = self.bar_accum[sym]
         row = {
-            "Open":   bar.open,
-            "High":   bar.high,
-            "Low":    bar.low,
-            "Close":  bar.close,
-            "Volume": bar.volume,
+            "Open":   window[0].open,
+            "High":   max(b.high   for b in window),
+            "Low":    min(b.low    for b in window),
+            "Close":  window[-1].close,
+            "Volume": sum(b.volume for b in window),
         }
         self.buffers[sym].append((bar.timestamp, row))
 
