@@ -1,5 +1,15 @@
+# Secrets — never commit
+.env
+.env.*
+!.env.example
+
+# Python
 __pycache__/
 *.pyc
+.venv/
+venv/
+
+# Data / run artifacts
 backtest_results.csv
 watchlist.json
 
