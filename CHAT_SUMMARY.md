@@ -28,17 +28,16 @@ A rule-based day trading bot that removes emotional decision-making. It uses a w
 
 ## Alpaca Credentials
 
-```
-ALPACA_API_KEY    = PKTEOT5NNUQTGYLAAEKJ3YIPCV
-ALPACA_SECRET_KEY = CxTGPWTVKcdpNR3bWkjgsWUy7FGEskyGXSaJ9eKWMJSa
-Paper trading:      paper=True (default in broker/alpaca.py)
-Data feed:          DataFeed.IEX (free tier — change to DataFeed.SIP with paid plan)
-```
+> **Security:** Never commit real keys. Keep them in a gitignored `.env` (see
+> `.env.example`) or the shell environment. The keys that were previously
+> pasted here in plaintext have been rotated and revoked. Paper trading is the
+> default (`paper=True` in `broker/alpaca.py`); data feed is `DataFeed.IEX`
+> (free tier — change to `DataFeed.SIP` with a paid plan).
 
-Set in PowerShell before running anything:
+Set in PowerShell before running anything (values from your `.env`, not hard-coded):
 ```powershell
-$env:ALPACA_API_KEY = "PKTEOT5NNUQTGYLAAEKJ3YIPCV"
-$env:ALPACA_SECRET_KEY = "CxTGPWTVKcdpNR3bWkjgsWUy7FGEskyGXSaJ9eKWMJSa"
+$env:ALPACA_API_KEY = "${ALPACA_API_KEY}"
+$env:ALPACA_SECRET_KEY = "${ALPACA_SECRET_KEY}"
 ```
 
 ---
@@ -160,8 +159,8 @@ Start-ScheduledTask -TaskName "DayTradeBot-DailyBacktest"
 **Live paper bot:**
 ```powershell
 cd C:\Users\Browndan\Documents\DayTradeBot
-$env:ALPACA_API_KEY = "PKTEOT5NNUQTGYLAAEKJ3YIPCV"
-$env:ALPACA_SECRET_KEY = "CxTGPWTVKcdpNR3bWkjgsWUy7FGEskyGXSaJ9eKWMJSa"
+$env:ALPACA_API_KEY = "${ALPACA_API_KEY}"
+$env:ALPACA_SECRET_KEY = "${ALPACA_SECRET_KEY}"
 python main.py
 # then: add NVDA, add TSLA
 ```
