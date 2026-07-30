@@ -34,14 +34,16 @@ class RiskManager:
         atr_period: int = 14,
         atr_stop_multiplier: float = 1.5,
         reward_ratio: float = 2.0,
-        min_atr: float = 0.50,    # skip low-volatility symbols where signals are noise
+        min_atr_pct: float = 0.001,       # skip symbols whose ATR is < 0.1% of price (noise)
+        max_position_pct: float = 0.25,   # cap any single position at 25% of equity
     ):
         self.account_value = account_value
         self.risk_pct = risk_pct
         self.atr_period = atr_period
         self.atr_stop_multiplier = atr_stop_multiplier
         self.reward_ratio = reward_ratio
-        self.min_atr = min_atr
+        self.min_atr_pct = min_atr_pct
+        self.max_position_pct = max_position_pct
 
     def _atr(self, df: pd.DataFrame) -> float:
         high = df["High"]
@@ -57,10 +59,10 @@ class RiskManager:
             return None
 
         atr = self._atr(df)
-        if atr < self.min_atr:
-            return None  # symbol too quiet — signals are noise
-
         entry = float(df["Close"].iloc[-1])
+        if pd.isna(atr) or entry <= 0 or atr < entry * self.min_atr_pct:
+            return None  # ATR too small relative to price — signals are noise
+
         stop_distance = atr * self.atr_stop_multiplier
 
         if direction == Direction.BUY:
@@ -74,6 +76,12 @@ class RiskManager:
 
         risk_amount = self.account_value * self.risk_pct
         shares = max(1, int(risk_amount / stop_distance))
+
+        # Cap notional so one tight-stop trade can't dominate the account.
+        max_shares = int(self.max_position_pct * self.account_value / entry)
+        if max_shares < 1:
+            return None  # price too high to fit even a minimal capped position
+        shares = min(shares, max_shares)
 
         return TradeParams(
             symbol=symbol,

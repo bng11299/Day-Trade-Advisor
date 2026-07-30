@@ -27,7 +27,7 @@ import watchlist
 from engine.aggregator import SignalAggregator
 from engine.risk import RiskManager
 from broker.alpaca import AlpacaBroker
-from broker.data import LiveBarStream
+from broker.data import LiveBarStream, fetch_prev_close
 from strategies.base import Direction
 
 EOD_CLOSE_UTC_HOUR = 20   # 3:45pm ET = 20:45 UTC
@@ -77,15 +77,31 @@ def eod_monitor(broker: AlpacaBroker, stop_event: threading.Event, start_equity:
         time.sleep(30)
 
 
-def make_on_bar(broker: AlpacaBroker, aggregator: SignalAggregator, risk_mgr: RiskManager):
+def make_on_bar(
+    broker: AlpacaBroker,
+    aggregator: SignalAggregator,
+    risk_mgr: RiskManager,
+    uvxy_state: dict,
+):
     """Returns a callback invoked on every real-time bar for a symbol."""
 
     def on_bar(symbol: str, df):
+        # UVXY regime tracker — update fear gauge, don't evaluate as a trade
+        if symbol == "UVXY":
+            prev = uvxy_state.get("prev_close")
+            if prev:
+                current = float(df["Close"].iloc[-1])
+                uvxy_state["pct"] = (current - prev) / prev * 100
+                bump = SignalAggregator._uvxy_threshold_bump(uvxy_state["pct"])
+                if bump > 0:
+                    print(f"\n[UVXY] {uvxy_state['pct']:+.1f}%  → confidence threshold +{bump:.2f}", flush=True)
+            return
+
         acct = broker.get_account()
         risk_mgr.account_value = acct["equity"]
         open_positions = {p["symbol"] for p in broker.get_positions()}
 
-        agg = aggregator.analyze(df)
+        agg = aggregator.analyze(df, uvxy_pct=uvxy_state.get("pct", 0.0))
         print(f"\n[bar] {symbol}: {agg}")
 
         if agg.direction == Direction.HOLD:
@@ -168,12 +184,19 @@ def main():
     acct = broker.get_account()
     risk_mgr = RiskManager(account_value=acct["equity"])
 
+    # UVXY regime tracker state — shared across all bar callbacks
+    uvxy_prev = fetch_prev_close("UVXY", api_key, secret_key)
+    uvxy_state = {"prev_close": uvxy_prev, "pct": 0.0}
+    if uvxy_prev:
+        print(f"UVXY prev close: ${uvxy_prev:.2f}  (fear gauge active)")
+
     stream = LiveBarStream(api_key=api_key, secret_key=secret_key, buffer=120)
 
-    # Pre-load watchlist into stream
+    # Pre-load watchlist + UVXY into stream (UVXY gated out of order logic)
     symbols = watchlist.load()
-    callback = make_on_bar(broker, aggregator, risk_mgr)
-    stream.subscribe(symbols, callback)
+    stream_symbols = symbols + (["UVXY"] if "UVXY" not in symbols else [])
+    callback = make_on_bar(broker, aggregator, risk_mgr, uvxy_state)
+    stream.subscribe(stream_symbols, callback)
 
     print(f"Day Trade Bot started (paper trading, real-time stream)")
     print(f"Account equity: ${acct['equity']:.2f}")

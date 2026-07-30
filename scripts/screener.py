@@ -27,6 +27,24 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
+# Scheduled (non-interactive) runs self-log to a dated file under scripts/logs/ so no
+# shell >> redirect is needed — that redirect's teardown was throwing a false-alarm
+# exit code (0xC000013A) even though the screen completed. Manual/TTY runs print normally.
+# Logs older than 30 days are pruned on startup.
+if not getattr(sys.stdout, "isatty", lambda: False)():
+    from zoneinfo import ZoneInfo
+    from datetime import date as _date
+    _LOG_DIR = ROOT / "scripts" / "logs"
+    _LOG_DIR.mkdir(parents=True, exist_ok=True)
+    _today = datetime.now(ZoneInfo("America/New_York")).date()
+    sys.stdout = sys.stderr = open(_LOG_DIR / f"screener_{_today}.log", "a", encoding="utf-8", buffering=1)
+    for _old in _LOG_DIR.glob("screener_*.log"):
+        try:
+            if (_today - _date.fromisoformat(_old.stem.removeprefix("screener_"))).days > 30:
+                _old.unlink()
+        except (ValueError, OSError):
+            pass
+
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
@@ -41,6 +59,7 @@ SECTORS = {
         "SNPS","CDNS","FTNT","PANW","NOW","INTU","IBM","HPQ","HPE","WDC",
         "STX","NTAP","CDW","KEYS","JNPR","FFIV","AKAM","MPWR","ENPH","FSLR",
         "GLW","TEL","APH","MSI","IT","GDDY","EPAM","CTSH","ACN",
+        "PLTR","SMCI",
     ],
     "Communication Services": [
         "GOOGL","META","NFLX","DIS","CMCSA","T","VZ","TMUS","EA","TTWO",
@@ -67,7 +86,7 @@ SECTORS = {
     ],
     "Financials": [
         "JPM","BAC","WFC","GS","MS","C","BLK","AXP","V","MA",
-        "PYPL","COF","USB","TFC","PNC","SCHW","BX","CB","MET","PRU",
+        "PYPL","COF","USB","TFC","PNC","SCHW","BX","CB","MET","PRU","COIN",
         "AFL","ALL","AIG","BEN","IVZ","TROW","BRK.B","ICE","CME","CBOE",
         "SPGI","MCO","FI","FIS","FISV","PAYX","ADP","RJF","MKTX",
         "HIG","L","GL","RHI","AIZ","AJG","MMC","WTW","CINF","PFG",
@@ -111,8 +130,8 @@ SP500 = sorted(set(
 SYMBOL_SECTOR = {s: sec for sec, syms in SECTORS.items() for s in syms}
 
 # ── screening parameters ──────────────────────────────────────────────────────
-DEFAULT_TOP_N           = 15
-DEFAULT_MAX_PER_SECTOR  = 2      # diversity cap: at most this many per sector
+DEFAULT_TOP_N           = 20
+DEFAULT_MAX_PER_SECTOR  = 3      # diversity cap: at most this many per sector
 DEFAULT_MIN_ATR         = 0.75   # dollars
 DEFAULT_MIN_VOLUME      = 500_000
 DEFAULT_MIN_PRICE       = 10.0

@@ -57,8 +57,12 @@ class VWAPStrategy(Strategy):
         if crossed_down:
             return Signal(Direction.SELL, 0.65, "bearish VWAP crossover")
 
-        # Price above/below VWAP with momentum
+        # Price above/below VWAP — scale confidence by proximity to band (0.45–0.70)
         if current_close > current_vwap:
-            return Signal(Direction.BUY, 0.45, f"price above VWAP ({current_vwap:.2f})")
+            ratio = min(deviation / bands, 1.0) if bands > 0 else 0.0
+            confidence = round(0.45 + 0.25 * ratio, 2)
+            return Signal(Direction.BUY, confidence, f"price above VWAP ({current_vwap:.2f})")
 
-        return Signal(Direction.SELL, 0.45, f"price below VWAP ({current_vwap:.2f})")
+        ratio = min(-deviation / bands, 1.0) if bands > 0 else 0.0
+        confidence = round(0.45 + 0.25 * ratio, 2)
+        return Signal(Direction.SELL, confidence, f"price below VWAP ({current_vwap:.2f})")

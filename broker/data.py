@@ -31,6 +31,33 @@ def _timeframe(interval: str) -> TimeFrame:
     return mapping[interval]
 
 
+def fetch_prev_close(
+    symbol: str,
+    api_key: str = None,
+    secret_key: str = None,
+) -> float | None:
+    """
+    Return the most recent completed daily close for a symbol.
+    Used to compute intraday % change (e.g. for UVXY regime tracking).
+    Returns None if data is unavailable.
+    """
+    from datetime import timedelta
+    try:
+        end = datetime.now(timezone.utc)
+        start = end - timedelta(days=7)
+        df = fetch_bars(
+            symbol,
+            start.strftime("%Y-%m-%d"),
+            end.strftime("%Y-%m-%d"),
+            interval="1d",
+            api_key=api_key,
+            secret_key=secret_key,
+        )
+        return float(df["Close"].iloc[-1]) if not df.empty else None
+    except Exception:
+        return None
+
+
 def fetch_bars(
     symbol: str,
     start: str,
@@ -147,7 +174,7 @@ class LiveBarStream:
         }
         self._buffers[sym].append((bar.timestamp, row))
 
-        if self._callback and len(self._buffers[sym]) >= 30:
+        if self._callback and len(self._buffers[sym]) >= 21:
             df = pd.DataFrame(
                 [r for _, r in self._buffers[sym]],
                 index=pd.DatetimeIndex([t for t, _ in self._buffers[sym]]),

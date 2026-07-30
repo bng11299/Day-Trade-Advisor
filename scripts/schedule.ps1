@@ -17,8 +17,7 @@
 
 $BotRoot     = "C:\Users\Browndan\Documents\DayTradeBot"
 $Python      = "C:\Users\Browndan\AppData\Local\Programs\Python\Python313\python.exe"
-$ScreenerLog = "$BotRoot\scripts\screener.log"
-$BacktestLog = "$BotRoot\scripts\daily_backtest.log"
+$LogDir = "$BotRoot\scripts\logs"   # both scripts self-log here, one file per day
 
 $ApiKey    = $env:ALPACA_API_KEY
 $SecretKey = $env:ALPACA_SECRET_KEY
@@ -27,10 +26,18 @@ if (-not $ApiKey)    { $ApiKey    = Read-Host "Enter ALPACA_API_KEY" }
 if (-not $SecretKey) { $SecretKey = Read-Host "Enter ALPACA_SECRET_KEY" }
 
 function Register-BotTask($TaskName, $ScriptPath, $LogPath, $TriggerTime, $Description, $TimeoutMin) {
-    $Command  = '$env:ALPACA_API_KEY = ''' + $ApiKey + '''; $env:ALPACA_SECRET_KEY = ''' + $SecretKey + '''; & ''' + $Python + ''' ''' + $ScriptPath + ''' >> ''' + $LogPath + ''' 2>&1'
-    $Action   = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NonInteractive -ExecutionPolicy Bypass -Command `"$Command`""
+    # Empty $LogPath => the script self-logs (daily_backtest.py); otherwise append stdout via >>.
+    $Redirect = ''
+    if ($LogPath) { $Redirect = ' >> ''' + $LogPath + ''' 2>&1' }
+    $Command  = '$env:ALPACA_API_KEY = ''' + $ApiKey + '''; $env:ALPACA_SECRET_KEY = ''' + $SecretKey + '''; & ''' + $Python + ''' ''' + $ScriptPath + '''' + $Redirect
+
+    # -WorkingDirectory is required: the scripts resolve paths relative to the bot root.
+    $Action   = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NonInteractive -ExecutionPolicy Bypass -Command `"$Command`"" -WorkingDirectory $BotRoot
     $Trigger  = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Monday,Tuesday,Wednesday,Thursday,Friday -At $TriggerTime
     $Settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes $TimeoutMin) -MultipleInstances IgnoreNew -StartWhenAvailable
+    # Don't let battery state skip or kill the run (laptop may be unplugged at trigger time).
+    $Settings.DisallowStartIfOnBatteries = $false
+    $Settings.StopIfGoingOnBatteries     = $false
 
     $Existing = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
     if ($Existing) {
@@ -42,8 +49,8 @@ function Register-BotTask($TaskName, $ScriptPath, $LogPath, $TriggerTime, $Descr
     Write-Host "Registered: $TaskName  (fires at $TriggerTime weekdays)"
 }
 
-Register-BotTask "DayTradeBot-Screener" "$BotRoot\scripts\screener.py" $ScreenerLog "9:15PM" "Screens SP500 for high-ATR/volume names. Writes watchlist.json before market open." 10
-Register-BotTask "DayTradeBot-DailyBacktest" "$BotRoot\scripts\daily_backtest.py" $BacktestLog "9:25PM" "Live shadow runner: logs strategy signals during market hours, compares to actual fills at close." 600
+Register-BotTask "DayTradeBot-Screener" "$BotRoot\scripts\screener.py" "" "9:15PM" "Screens SP500 for high-ATR/volume names. Writes watchlist.json before market open." 10
+Register-BotTask "DayTradeBot-DailyBacktest" "$BotRoot\scripts\daily_backtest.py" "" "9:25PM" "Live shadow runner: logs strategy signals during market hours, compares to actual fills at close." 600
 
 Write-Host ""
 Write-Host "Both tasks registered. Daily schedule (Singapore Time, SGT = UTC+8):"
@@ -54,8 +61,8 @@ Write-Host ""
 Write-Host "Useful commands:"
 Write-Host "  Start-ScheduledTask -TaskName 'DayTradeBot-Screener'"
 Write-Host "  Start-ScheduledTask -TaskName 'DayTradeBot-DailyBacktest'"
-Write-Host "  Get-Content '$ScreenerLog' -Tail 30"
-Write-Host "  Get-Content '$BacktestLog' -Tail 50 -Wait"
+Write-Host "  Get-ChildItem '$LogDir\screener_*.log' | Sort LastWriteTime | Select -Last 1 | Get-Content -Tail 30"
+Write-Host "  Get-ChildItem '$LogDir\daily_backtest_*.log' | Sort LastWriteTime | Select -Last 1 | Get-Content -Tail 50 -Wait"
 Write-Host ""
 Write-Host "To remove tasks:"
 Write-Host "  Unregister-ScheduledTask -TaskName 'DayTradeBot-Screener'      -Confirm:`$false"

@@ -2,3 +2,7 @@ __pycache__/
 *.pyc
 backtest_results.csv
 watchlist.json
+
+# Runtime logs
+scripts/*.log
+scripts/logs/
