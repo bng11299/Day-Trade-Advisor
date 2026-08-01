@@ -1,0 +1,3 @@
+time,symbol,side,qty,fill_price,status
+2026-07-15T16:00:21.595002+00:00,ABT,sell,832.0,89.288859,filled
+2026-07-15T15:45:04.170514+00:00,ABT,buy,832.0,89.7,filled

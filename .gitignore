@@ -12,3 +12,7 @@ venv/
 # Data / run artifacts
 backtest_results.csv
 watchlist.json
+
+# Runtime logs
+scripts/*.log
+scripts/logs/

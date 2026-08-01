@@ -1,0 +1,3 @@
+time,symbol,side,qty,fill_price,status
+2026-07-10T19:55:41.315076+00:00,BKR,sell,1295.0,57.72,filled
+2026-07-10T18:15:05.667326+00:00,BKR,buy,1295.0,57.75,filled

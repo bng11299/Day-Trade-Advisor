@@ -1,6 +1,5 @@
 import pandas as pd
 from dataclasses import dataclass
-from typing import Optional
 from strategies.base import Signal, Direction
 from strategies.orb import ORBStrategy
 from strategies.vwap import VWAPStrategy
@@ -25,8 +24,10 @@ class AggregatedSignal:
 class SignalAggregator:
     """
     Weighted vote across ORB, VWAP, EMA.
-    RSI acts as a veto gate — blocks trades when market is already extended.
-    Final signal requires confidence > threshold to act.
+    RSI acts as a hard veto — blocks trades when price is already extended.
+    UVXY acts as a soft regime filter — raises the confidence threshold when
+    market fear is elevated, but never fully blocks a high-conviction signal.
+    Final signal requires confidence > effective threshold to act.
     """
 
     WEIGHTS = {
@@ -34,16 +35,37 @@ class SignalAggregator:
         "VWAP": 0.35,
         "EMA": 0.25,
     }
-    CONFIDENCE_THRESHOLD = 0.65  # raised from 0.55 — filters low-conviction noise
+    CONFIDENCE_THRESHOLD = 0.65
 
     def __init__(self, long_only: bool = False):
-        self.long_only = long_only  # suppress SELL signals in bull-trend markets
+        self.long_only = long_only
         self.orb = ORBStrategy()
         self.vwap = VWAPStrategy()
         self.ema = EMACrossoverStrategy()
         self.rsi = RSIFilter()
 
-    def analyze(self, df: pd.DataFrame) -> AggregatedSignal:
+    @staticmethod
+    def _uvxy_threshold_bump(uvxy_pct: float) -> float:
+        """
+        Returns how much to raise the confidence threshold based on UVXY's
+        intraday % change from previous close. Only activates when UVXY is up.
+
+        Tiers:
+          ≤ +2%  → no change   (normal daily noise)
+          +2–5%  → +0.03       (mild caution)
+          +5–10% → +0.06       (elevated fear)
+          > +10% → +0.10       (fear spike — max threshold 0.75)
+        """
+        if uvxy_pct <= 2.0:
+            return 0.0
+        elif uvxy_pct <= 5.0:
+            return 0.03
+        elif uvxy_pct <= 10.0:
+            return 0.06
+        else:
+            return 0.10
+
+    def analyze(self, df: pd.DataFrame, uvxy_pct: float = 0.0) -> AggregatedSignal:
         signals = {
             "ORB": self.orb.analyze(df),
             "VWAP": self.vwap.analyze(df),
@@ -90,8 +112,17 @@ class SignalAggregator:
                 agg.veto_reason = rsi_signal.reason
                 agg.direction = Direction.HOLD
 
-        # Below threshold → hold
-        if not agg.vetoed and agg.confidence < self.CONFIDENCE_THRESHOLD:
+        # UVXY regime filter: raises threshold during fear, never fully blocks.
+        # A signal that clears the bumped threshold still trades.
+        bump = self._uvxy_threshold_bump(uvxy_pct)
+        effective_threshold = self.CONFIDENCE_THRESHOLD + bump
+
+        if not agg.vetoed and agg.confidence < effective_threshold:
             agg.direction = Direction.HOLD
+            # Only label UVXY as the deciding factor when it was actually the
+            # difference — i.e. confidence cleared the base threshold but not the bump.
+            if bump > 0 and agg.confidence >= self.CONFIDENCE_THRESHOLD:
+                agg.vetoed = True
+                agg.veto_reason = f"UVXY regime (+{uvxy_pct:.1f}%, threshold {effective_threshold:.2f})"
 
         return agg

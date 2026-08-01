@@ -1,0 +1,3 @@
+time,symbol,side,qty,fill_price,status
+2026-07-17T19:15:02.680038+00:00,PYPL,sell,1306.0,56.883507,filled
+2026-07-17T19:05:04.351099+00:00,PYPL,buy,1306.0,57.05,filled

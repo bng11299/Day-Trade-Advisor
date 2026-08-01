@@ -247,7 +247,8 @@ All open positions are automatically closed at 3:45pm ET. Day trading positions 
 risk_pct = 0.01              # 1% of account risked per trade
 atr_stop_multiplier = 1.5
 reward_ratio = 2.0
-min_atr = 0.50
+min_atr_pct = 0.001          # skip symbols whose ATR is < 0.1% of price
+max_position_pct = 0.25      # cap any single position at 25% of equity
 ```
 
 ---
@@ -451,7 +452,7 @@ backtest/daily/
 ├── day01_2026-06-11_signals.csv   ← every bar: signal, confidence, would-trade params
 ├── day01_2026-06-11_actual.csv    ← every Alpaca order filled that day
 backtest/30day_summary.csv         ← running totals: signals, trades, alignment % per day
-scripts/daily_backtest.log         ← full stdout from every scheduled run
+scripts/logs/daily_backtest_YYYY-MM-DD.log  ← per-day stdout from each scheduled run (auto-pruned after 30 days)
 ```
 
 #### Automatic scheduling
@@ -468,8 +469,8 @@ powershell -ExecutionPolicy Bypass -File "scripts\schedule.ps1"
 # Force a run right now (for testing)
 Start-ScheduledTask -TaskName "DayTradeBot-DailyBacktest"
 
-# Watch the live log
-Get-Content scripts\daily_backtest.log -Tail 50 -Wait
+# Watch the live log (newest per-day file)
+Get-ChildItem scripts\logs\daily_backtest_*.log | Sort LastWriteTime | Select -Last 1 | Get-Content -Tail 50 -Wait
 
 # View the 30-day summary
 Import-Csv backtest\30day_summary.csv | Format-Table
@@ -502,7 +503,8 @@ On the last day the script prints a go/no-go verdict:
 | `risk_pct` | `engine/risk.py` | `0.01` | Fraction of account risked per trade |
 | `atr_stop_multiplier` | `engine/risk.py` | `1.5` | Stop distance as ATR multiple |
 | `reward_ratio` | `engine/risk.py` | `2.0` | Take profit = stop × this |
-| `min_atr` | `engine/risk.py` | `0.50` | Skip symbols quieter than this |
+| `min_atr_pct` | `engine/risk.py` | `0.001` | Skip symbols whose ATR is < 0.1% of price |
+| `max_position_pct` | `engine/risk.py` | `0.25` | Cap any single position at this fraction of equity |
 | `DAILY_LOSS_LIMIT_PCT` | `main.py` | `0.02` | Halt after losing 2% in a day |
 | `EOD_CLOSE_UTC_HOUR` | `main.py` | `20` | Force-close at 3:45pm ET (20:45 UTC) |
 | `SYMBOLS` | `scripts/daily_backtest.py` | `["NVDA","TSLA"]` | Symbols shadow runner watches |
@@ -574,7 +576,7 @@ DayTradeBot/
 │   ├── daily_backtest.py        # Live shadow runner (market hours, 30-day period)
 │   ├── schedule.ps1             # One-time Task Scheduler registration
 │   ├── state.json               # Tracks current day in 30-day period
-│   └── daily_backtest.log       # Append-only log from scheduled runs
+│   └── logs/                    # Per-day stdout logs (auto-pruned after 30 days)
 │
 ├── watchlist.json               # Persisted symbol list (gitignored)
 ├── requirements.txt
